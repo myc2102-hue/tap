@@ -253,7 +253,7 @@ input[type=text]:focus{border-color:var(--cyan);box-shadow:0 0 12px rgba(0,229,2
     <input type="text" id="nickInput" placeholder="닉네임을 입력하세요" maxlength="12" autocomplete="off">
     <button class="btn" onclick="joinGame()">▶ 입 장 하 기</button>
     <button class="btn ghost" id="soundToggle" onclick="toggleSound()">🔊 소리 ON</button>
-<button class="btn ghost" id="bgmToggle" onclick="toggleBGM()">🎵 BGM ON</button>
+    <button class="btn ghost" id="bgmToggle" onclick="toggleBGM()">🎵 BGM ON</button>
     <div class="login-tip">방을 만들거나 들어가서 방장이 시작하면<br>3초 카운트 후 <b>10초간 미친듯이 연타!</b><br>가장 많이 누른 사람이 1위 🏆</div>
   </div>
 </div>
@@ -266,6 +266,7 @@ input[type=text]:focus{border-color:var(--cyan);box-shadow:0 0 12px rgba(0,229,2
     <span class="pill"><span class="dot-live"></span>동시접속 <b id="onlineCount">0</b>명</span>
     <span class="pill mybadge">🎮 <b id="myNick">-</b></span>
     <button class="btn ghost" style="padding:7px 12px;font-size:14px" id="soundToggle2" onclick="toggleSound()">🔊</button>
+    <button class="btn ghost" style="padding:7px 12px;font-size:14px" id="bgmToggle2" onclick="toggleBGM()">🎵</button>
   </div>
 
   <!-- 로비 -->
@@ -378,6 +379,7 @@ const serverNow = () => Date.now() + serverOffset;
 let currentRoomId = null;
 let currentRoom = null;                  // 방 데이터 스냅샷
 let roomRef = null, roomListener = null;
+let iAmHost = false;                     // 내가 이 방의 방장(만든 사람)인지
 
 // 게임 진행 상태
 let phase = "lobby";                     // lobby / waiting / countdown / playing / result
@@ -422,6 +424,95 @@ function toggleSound(){
 }
 
 /* =========================================================
+   2-B. 레트로 BGM (칩튠 - 외부 파일 없이 코드로 생성)
+   ========================================================= */
+let bgmOn = true;
+let bgmGain = null;
+let bgmTimer = null;
+let bgmNextTime = 0;
+let bgmStep = 0;
+const BGM_BPM = 138;
+const BGM_STEP = 60/BGM_BPM/4;          // 16분음표 길이(초)
+
+// 32스텝 = 2마디 루프. 숫자는 음높이(MIDI), 0=쉼표 / 코드진행 Am-F-C-G
+const BGM_LEAD = [
+  69,0,72,76, 72,0,69,0,
+  65,0,69,72, 69,0,65,0,
+  67,0,72,76, 72,0,67,0,
+  67,0,71,74, 71,0,67,0
+];
+const BGM_BASS = [
+  45,45,0,45, 45,0,45,0,
+  41,41,0,41, 41,0,41,0,
+  48,48,0,48, 48,0,48,0,
+  43,43,0,43, 43,0,43,0
+];
+const midiToFreq = m => 440 * Math.pow(2,(m-69)/12);
+
+function bgmTone(freq, t, dur, vol, type){
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type=type; o.frequency.value=freq;
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(vol, t+0.01);
+  g.gain.exponentialRampToValueAtTime(0.0008, t+dur);
+  o.connect(g); g.connect(bgmGain);
+  o.start(t); o.stop(t+dur+0.02);
+}
+function bgmKick(t){
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type='sine';
+  o.frequency.setValueAtTime(150,t);
+  o.frequency.exponentialRampToValueAtTime(45,t+0.12);
+  g.gain.setValueAtTime(0.5,t);
+  g.gain.exponentialRampToValueAtTime(0.001,t+0.14);
+  o.connect(g); g.connect(bgmGain);
+  o.start(t); o.stop(t+0.16);
+}
+function bgmHat(t){
+  const buf=audioCtx.createBuffer(1, 800, audioCtx.sampleRate);
+  const d=buf.getChannelData(0);
+  for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+  const src=audioCtx.createBufferSource(); src.buffer=buf;
+  const f=audioCtx.createBiquadFilter(); f.type='highpass'; f.frequency.value=7000;
+  const g=audioCtx.createGain();
+  g.gain.setValueAtTime(0.12,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.05);
+  src.connect(f); f.connect(g); g.connect(bgmGain);
+  src.start(t); src.stop(t+0.06);
+}
+function bgmScheduleStep(step, t){
+  const lead=BGM_LEAD[step];
+  if(lead) bgmTone(midiToFreq(lead+12), t, BGM_STEP*0.9, 0.16, 'square');   // 리드(한 옥타브 위)
+  const bass=BGM_BASS[step];
+  if(bass) bgmTone(midiToFreq(bass), t, BGM_STEP*1.6, 0.22, 'triangle');    // 베이스
+  if(step%4===0) bgmKick(t);                                                // 킥(4박)
+  if(step%2===1) bgmHat(t);                                                 // 하이햇(엇박)
+}
+function bgmLoop(){
+  if(!audioCtx) return;
+  while(bgmNextTime < audioCtx.currentTime + 0.12){
+    bgmScheduleStep(bgmStep, bgmNextTime);
+    bgmNextTime += BGM_STEP;
+    bgmStep = (bgmStep+1)%32;
+  }
+}
+function bgmStart(){
+  if(!audioCtx || !bgmOn) return;
+  if(!bgmGain){ bgmGain=audioCtx.createGain(); bgmGain.gain.value=0.4; bgmGain.connect(audioCtx.destination); }
+  if(bgmTimer) return;                    // 이미 재생중
+  bgmNextTime = audioCtx.currentTime + 0.1;
+  bgmStep = 0;
+  bgmTimer = setInterval(bgmLoop, 25);
+}
+function bgmStop(){ if(bgmTimer){ clearInterval(bgmTimer); bgmTimer=null; } }
+function toggleBGM(){
+  bgmOn = !bgmOn;
+  const label = bgmOn ? '🎵 BGM ON' : '🎵 BGM OFF';
+  const a=document.getElementById('bgmToggle'); if(a) a.textContent=label;
+  const b=document.getElementById('bgmToggle2'); if(b) b.style.opacity = bgmOn ? '1':'0.4';
+  if(bgmOn){ initAudio(); bgmStart(); } else { bgmStop(); }
+}
+
+/* =========================================================
    3. 입장 / 닉네임
    ========================================================= */
 function joinGame(){
@@ -429,6 +520,7 @@ function joinGame(){
   if(!n){ alert('닉네임을 입력해주세요!'); return; }
   myName = n;
   initAudio();
+  bgmStart();
 
   document.getElementById('loginScreen').style.display = 'none';
   document.getElementById('app').style.display = 'block';
@@ -539,19 +631,26 @@ function createRoom(){
     players: { [myUserId]: { name: myName, score:0, joinedAt: TS } }
   }).then(()=>{
     document.getElementById('roomNameInput').value='';
-    enterRoom(ref.key);
+    enterRoom(ref.key, true);   // 만든 사람 = 방장
   });
 }
 function joinRoom(id){
   if(currentRoomId){ alert('이미 방에 있습니다.'); return; }
   const pref = db.ref(ROOT+'/rooms/'+id+'/players/'+myUserId);
-  pref.set({ name: myName, score:0, joinedAt: TS }).then(()=> enterRoom(id));
+  pref.set({ name: myName, score:0, joinedAt: TS }).then(()=> enterRoom(id, false));   // 참가자
 }
-function enterRoom(id){
+function enterRoom(id, isHost){
   currentRoomId = id;
+  iAmHost = isHost;
   roomRef = db.ref(ROOT+'/rooms/'+id);
-  // 연결 끊기면 내 플레이어 자동 삭제
-  roomRef.child('players/'+myUserId).onDisconnect().remove();
+
+  if(isHost){
+    // 방장이 연결을 끊으면(브라우저 닫기 등) 방 전체 삭제 = 폭파
+    roomRef.onDisconnect().remove();
+  } else {
+    // 참가자가 연결을 끊으면 본인만 방에서 빠짐
+    roomRef.child('players/'+myUserId).onDisconnect().remove();
+  }
 
   document.getElementById('lobby').style.display='none';
   document.getElementById('roomView').style.display='block';
@@ -563,18 +662,22 @@ function enterRoom(id){
 }
 function leaveRoom(){
   if(!roomRef) return;
-  roomRef.child('players/'+myUserId).onDisconnect().cancel();
-  roomRef.child('players/'+myUserId).remove();
-  // 내가 나가서 빈 방이면 삭제
-  roomRef.child('players').once('value', s=>{
-    if(s.numChildren()===0) roomRef.remove();
-  });
+  if(iAmHost){
+    // 방장이 나가면 방을 통째로 삭제(폭파) → 안에 있던 사람 전부 로비로
+    roomRef.onDisconnect().cancel();
+    roomRef.remove();
+  } else {
+    // 참가자는 본인만 빠져나감
+    roomRef.child('players/'+myUserId).onDisconnect().cancel();
+    roomRef.child('players/'+myUserId).remove();
+  }
   cleanupRoom();
 }
 function cleanupRoom(){
   if(roomRef && roomListener) roomRef.off('value', roomListener);
   stopGameTick();
   roomRef=null; roomListener=null; currentRoomId=null; currentRoom=null;
+  iAmHost=false;
   phase='lobby';
   document.getElementById('roomView').style.display='none';
   document.getElementById('lobby').style.display='grid';
@@ -584,23 +687,13 @@ function cleanupRoom(){
    8. 방 데이터 변경 처리
    ========================================================= */
 function onRoomUpdate(room){
-  if(!room){ // 방이 삭제됨
-    alert('방이 종료되었습니다.');
+  if(!room){ // 방이 삭제됨 (방장이 나갔거나 폭파됨)
+    alert('방장이 나가서 방이 종료되었습니다.');
     cleanupRoom();
     return;
   }
   currentRoom = room;
   document.getElementById('roomTitle').textContent = room.name || '방';
-
-  // 방장이 나갔으면 가장 먼저 들어온 사람이 방장 승계
-  const players = room.players || {};
-  if(!players[room.host]){
-    const ids = Object.keys(players).sort((a,b)=>(players[a].joinedAt||0)-(players[b].joinedAt||0));
-    if(ids.length && ids[0]===myUserId){
-      roomRef.update({ host: myUserId, hostName: myName });
-    }
-    if(ids.length===0){ roomRef.remove(); return; }
-  }
 
   const amHost = (room.host===myUserId);
   // 스타트 버튼은 방장 + (대기/결과) 상태에서만
