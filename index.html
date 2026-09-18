@@ -4230,6 +4230,10 @@
   .bubble.dead::after{ border-top-color:#7a0f1a; }
   .bubble.win{ background:#fff5c2; border-color:#b07a00; }
   .bubble.win::after{ border-top-color:#b07a00; }
+  /* 거인석상 대사: 돌 빛깔 바탕 + 화염색 테두리, 참가자 말풍선보다 크게 */
+  .bubble.giant{ background:#2b2e38; color:#ffe2b0; border-color:#ff6a1a; font-size:1.9em; letter-spacing:.02em; padding:.4em .9em;
+    box-shadow:0 0 18px rgba(255,106,26,.55), 0 4px 12px rgba(0,0,0,.5); }
+  .bubble.giant::after{ border-top-color:#ff6a1a; }
   .bubble.out{ animation:bubbleOut .3s ease-in forwards; }
   @keyframes bubbleOut{ to{ opacity:0; transform:translate(-50%,-100%) translate(var(--tx),var(--ty)) scale(.6); } }
   /* 붉은 비네트 / 플래시 */
@@ -6111,6 +6115,13 @@ function say(p, text, ttl, cls){
   G.bubbles.push({ p, x: p.x, z: p.z, el, t: 0, ttl });
   while (G.bubbles.length > 40){ const b = G.bubbles.shift(); b.el.remove(); }
 }
+// 거인석상 말풍선: 석상은 참가자가 아니라서 머리 위 앵커를 직접 준다(받침대 0.7 + 석상 6배 스케일 → 입 높이 ≈ FLOOR_Y+7).
+// updateBubbles 는 p.alive 가 false 면 x·z·y 를 고정값으로 쓰므로 가짜 p 객체로 충분하다.
+function giantSay(gi, text, ttl){
+  const z = G.finishZ - 7;
+  const el = document.createElement('div'); el.className = 'bubble giant'; el.textContent = text; el.style.display = 'none'; labelsEl.appendChild(el);
+  G.bubbles.push({ p: { alive: false, x: gi.x, z }, x: gi.x, z, y: 4.8, el, t: 0, ttl });
+}
 // 한 프레임에 여러 명이 동시에 죽으면(싱크홀·열차·차량) 파편·핏물 생성이 한꺼번에 터져 프레임이 크게 튄다.
 // 사망 판정 자체는 그대로 두고 **연출 예산만** 순번에 따라 줄인다 — 대량 사망 장면에선 어차피 개체가 구분되지 않는다.
 let _deathFrame = -1, _deathsThisFrame = 0;
@@ -6342,10 +6353,10 @@ function makeGiant(kind){
 // 거인석상의 심판 — 결승 게이트의 석상 2기가, 도착을 자축하는 무리 뒤에서 눈을 뜨고 화염을 뿜는다.
 // 좌측 석상은 x<0, 우측은 x>=0 희생자를 바깥쪽부터 차례로 지진다. 제트는 희생자의 현재 위치를 홈잉하므로
 // 도망쳐도 소용없다(누가 죽는지는 이미 확정 — 연출만 그 운명을 따라간다).
-const FIRE_WINDUP = 2.0;   // 눈 점등·상체 숙임·사진 플래시가 지나가는 빌드업
+const FIRE_WINDUP = 4.0;   // 눈 점등·상체 숙임·석상의 경고 대사·사진 플래시가 지나가는 빌드업 (연출 전체를 2배로 늘림)
 class FireStrike {
   constructor(victims){
-    this.t = 0; this.done = false; this.victims = victims; this.fired = false; this.coolT = -1;
+    this.t = 0; this.done = false; this.victims = victims; this.fired = false; this.coolT = -1; this.spoke = 0;
     this.giants = finishGiants.map(fg => {
       fg.g.traverse(o => { o.matrixAutoUpdate = true; });          // 랜드마크로 얼어 있던(freezeStatic) 행렬을 다시 살린다
       const eyes = [-0.07, 0.07].map(ex => { const m = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.05, 0.03), new THREE.MeshBasicMaterial({ color: 0xff2200 }));
@@ -6355,7 +6366,7 @@ class FireStrike {
     // 처형 큐: 좌/우 석상이 자기 쪽 희생자를 바깥에서 안쪽 순으로
     const left = victims.filter(v => v.x < 0).sort((a, b) => a.x - b.x);
     const right = victims.filter(v => v.x >= 0).sort((a, b) => b.x - a.x);
-    const pace = clamp(3.6 / Math.max(left.length, right.length, 1), 0.24, 0.6);
+    const pace = clamp(7.2 / Math.max(left.length, right.length, 1), 0.48, 1.2);   // 처형 간격도 2배
     left.forEach((v, i) => this.giants[0].queue.push({ v, at: FIRE_WINDUP + i * pace }));
     right.forEach((v, i) => this.giants[1].queue.push({ v, at: FIRE_WINDUP + i * pace + pace * 0.5 }));
     Snd.rumble(); shake = Math.max(shake, 0.5);
@@ -6368,8 +6379,11 @@ class FireStrike {
   }
   update(dt){
     this.t += dt;
-    const k = clamp(this.t / 1.1, 0, 1);                        // 상체를 천천히 숙이며 내려다본다
-    if (!this.fired && this.t >= FIRE_WINDUP - 0.35 && G.trap){ // 첫 불꽃 직전에야 무리가 알아챈다
+    const k = clamp(this.t / 2.2, 0, 1);                        // 상체를 천천히 숙이며 내려다본다
+    // 거인석상의 경고 — 왼쪽 석상이 먼저, 오른쪽 석상이 이어서. 첫 불꽃(FIRE_WINDUP)까지 말풍선이 떠 있다
+    if (this.spoke === 0 && this.t >= 1.0){ this.spoke = 1; giantSay(this.giants[0], '돌아가…', FIRE_WINDUP - 1.0); }
+    if (this.spoke === 1 && this.t >= 1.9){ this.spoke = 2; giantSay(this.giants[1], '이곳은 너희들이 올 곳이 아니야', FIRE_WINDUP - 1.9); }
+    if (!this.fired && this.t >= FIRE_WINDUP - 0.7 && G.trap){  // 첫 불꽃 직전에야 무리가 알아챈다
       this.fired = true; if (G.trap) G.trap.hold = false;
       Snd.panic(Math.min(9, 2 + Math.floor(aliveList().length / 12)));
       moodTarget = 1; $('vignette').classList.add('on');
@@ -6380,7 +6394,7 @@ class FireStrike {
     for (const gi of this.giants){
       gi.g.rotation.x = -0.16 * k;                              // 앞으로 숙임 (참가자는 +Z 쪽)
       const pulse = 0.9 + Math.sin(this.t * 14) * 0.35;
-      for (const e of gi.eyes){ e.visible = this.t > 0.45; e.scale.setScalar(this.t > 0.45 ? pulse : 1); }
+      for (const e of gi.eyes){ e.visible = this.t > 0.9; e.scale.setScalar(this.t > 0.9 ? pulse : 1); }
       // 현재/다음 목표
       while (gi.next < gi.queue.length && !gi.queue[gi.next].v.alive) gi.next++;
       const item = gi.queue[gi.next];
@@ -6389,7 +6403,7 @@ class FireStrike {
         // 석상이 목표를 향해 몸을 트는 정도(연출) — 심하게 돌리면 받침대에서 떨어져 보인다
         const wantYaw = clamp(Math.atan2(v.x - gi.x, (v.z - (G.finishZ - 7))) * 0.5, -0.42, 0.42);
         gi.yaw += (wantYaw - gi.yaw) * Math.min(1, dt * 5); gi.g.rotation.y = gi.yaw;
-        if (this.t >= item.at - 0.42 && v.alive){               // 발사 0.42초 전부터 제트 분사(도달 시간)
+        if (this.t >= item.at - 0.84 && v.alive){               // 발사 0.84초 전부터 제트 분사(도달 시간)
           gi.g.updateMatrixWorld(true);
           this._mouth.set(0, 1.0, 0.2).applyMatrix4(gi.g.matrixWorld);
           this._tgt.set(v.x, FLOOR_Y + CHAR_H * 0.55, v.z);
@@ -6400,12 +6414,12 @@ class FireStrike {
         if (this.t >= item.at){ this.igniteVictim(v, gi); gi.next++; gi.jet = null; }
       } else { gi.jet = null; gi.g.rotation.y = gi.yaw += (0 - gi.yaw) * Math.min(1, dt * 3); }
     }
-    if (!busy && this.coolT < 0) this.coolT = this.t + 1.0;
+    if (!busy && this.coolT < 0) this.coolT = this.t + 2.0;
     if (this.coolT > 0 && this.t > this.coolT){
       // 마무리: 눈 끄고 원래 자세로 — 아무 일 없었다는 듯 다시 석상이 된다
       for (const gi of this.giants){ gi.g.rotation.x += (0 - gi.g.rotation.x) * Math.min(1, dt * 2); gi.g.rotation.y *= 0.9;
         for (const e of gi.eyes) e.visible = false; }
-      if (this.t > this.coolT + 0.9){
+      if (this.t > this.coolT + 1.8){
         for (const gi of this.giants){ gi.g.rotation.set(0, 0, 0); freezeStatic(gi.g); for (const e of gi.eyes){ gi.g.remove(e); e.geometry.dispose(); e.material.dispose(); } }
         Snd.sirenStop(); this.done = true;
       }
@@ -6955,7 +6969,7 @@ function updateBubbles(dt, W, H){
     const b = G.bubbles[i]; b.t += dt;
     if (b.t > b.ttl + 0.3){ b.el.remove(); G.bubbles.splice(i, 1); continue; }
     if (b.t > b.ttl) b.el.classList.add('out');
-    const live = b.p.alive; const px = live ? b.p.x : b.x, pz = live ? b.p.z : b.z, py = live ? b.p.model.position.y : 0;
+    const live = b.p.alive; const px = live ? b.p.x : b.x, pz = live ? b.p.z : b.z, py = live ? b.p.model.position.y : (b.y || 0);
     _lv.set(px, FLOOR_Y + CHAR_H + 1.15 + py, pz).applyMatrix4(_vpm);
     const on = !(_lv.z > 1 || Math.abs(_lv.x) > 1.15 || Math.abs(_lv.y) > 1.15);
     if (on !== b.on){ b.on = on; b.el.style.display = on ? '' : 'none'; }
