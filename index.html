@@ -4270,9 +4270,6 @@
   #controls button{ background:rgba(0,0,0,.45); color:#fff; border:1px solid rgba(255,255,255,.35);
     border-radius:8px; padding:7px 12px; font-size:14px; cursor:pointer; }
   #controls input[type=range]{ width:80px; }
-  #ticker{ position:fixed; left:18px; bottom:16px; z-index:5; color:#fff; font-size:14px; line-height:1.55;
-    text-shadow:0 2px 4px rgba(0,0,0,.6); pointer-events:none; }
-  #ticker div{ opacity:.9; }
 
   /* 시작/결과 오버레이 */
   .overlay{ position:fixed; inset:0; z-index:10; display:flex; align-items:center; justify-content:center;
@@ -4288,13 +4285,15 @@
   #result-overlay .pGroup{ margin-top:14px; }
   #result-overlay .pHead{ font-size:26px; gap:12px; margin-bottom:2px; }            /* 🎁 상품명 + N명 배지를 크게 (상품 3종까지 900px 높이에 스크롤 없이) */
   #result-overlay .pHead i{ font-size:17px; padding:3px 13px; }
-  #result-overlay .winners{ gap:14px; }
-  #result-overlay .wcard{ width:150px; padding:7px 7px 5px; }
-  #result-overlay .wcard .face{ height:100px; }
-  #result-overlay .wcard .pname{ font-size:16px; }
-  #result-overlay .winners.many .wcard{ width:104px; padding:5px 5px 4px; }
-  #result-overlay .winners.many .wcard .face{ height:76px; }
-  #result-overlay .winners.many .wcard .pname{ font-size:13px; }
+  /* 당첨자 카드: 항상 6열 그리드 (30명이 한 화면에) · 얼굴은 절반 크기 · 이름은 20% 크게 */
+  #result-overlay .winners{ display:grid; grid-template-columns:repeat(6, minmax(0,1fr)); gap:12px 10px; justify-items:center; align-items:start; }
+  #result-overlay .wcard{ width:100%; max-width:128px; padding:6px 6px 4px; }
+  #result-overlay .wcard .face{ width:75px; height:50px; margin:0 auto; }
+  #result-overlay .wcard .pname{ font-size:19px; text-align:center; }
+  #result-overlay .winners.many{ gap:10px 8px; }
+  #result-overlay .winners.many .wcard{ max-width:120px; padding:5px 5px 4px; }
+  #result-overlay .winners.many .wcard .face{ width:64px; height:42px; }
+  #result-overlay .winners.many .wcard .pname{ font-size:16px; }
   .panel textarea{ width:100%; height:110px; border:1.5px solid #ddd; border-radius:10px; padding:8px 10px; font-size:13px;
     resize:vertical; font-family:inherit; }
   .row{ display:flex; gap:10px; margin-top:10px; text-align:left; }
@@ -4363,7 +4362,6 @@
 
 <!-- 우측 탈락자 피드: 1라운드부터 전원 누적. 새 카드는 아래에서 밀고 올라오고, 화면을 넘치면 끝없이 위로 흐른다 -->
 <div id="photos"><div id="photosTrack"></div></div>
-<div id="ticker"></div>
 
 <div id="alert"></div>
 <div id="bossFlash"><img id="bossFlashImg" alt=""></div>
@@ -5948,7 +5946,8 @@ const ZONE_TRAPS = {
 };
 const G = { state: 'SETUP', t: 0, players: [], order: [], deathPtr: 0, winnersN: 1, rng: null, seed: '',
   nextCheckZ: -1e9, checkpoints: [], round: 0, rounds: 0, trap: null, actors: [], deaths: [], packZ: 0,
-  zoneIdx: -1, finishZ: -1e9, finalSprint: false, lastLeg: false, killPlan: [], bubbles: [], cheerT: 0, prizes: [] };
+  zoneIdx: -1, finishZ: -1e9, finalSprint: false, lastLeg: false, killPlan: [], bubbles: [], cheerT: 0, prizes: [],
+  usedTraps: [] };   // 이미 발생한 재해 — 한 게임에서 같은 재해가 두 번 나오지 않게 한다
 let shake = 0, hellFlash = 0, mood = 0, moodTarget = 0;
 const _hellTo = new THREE.Vector3();                       // step() 매 프레임 Vector3 할당 방지용 스크래치
 
@@ -6187,8 +6186,7 @@ function updateDeathFeed(dt){
   } else feed.scroll = Math.min(feed.scroll, Math.max(0, trackH - boxH));
   track.style.transform = `translateY(${(base + feed.off - feed.scroll).toFixed(1)}px)`;
 }
-function addTicker(msg){ const t = $('ticker'); const d = document.createElement('div'); d.textContent = msg; t.appendChild(d);
-  while (t.children.length > 5) t.removeChild(t.firstChild); setTimeout(() => { d.style.transition = 'opacity 1s'; d.style.opacity = 0; }, 6000); }
+function addTicker(msg){ /* 좌측 상태창 제거 — 호출부는 그대로 두고 아무것도 표시하지 않는다 */ }
 function updateHud(){
   $('alive-count').textContent = aliveList().length;
   $('roundLabel').textContent = G.round ? `ROUND ${G.round}` : '';
@@ -6448,9 +6446,25 @@ class Sinkhole {
 // ============================================================
 function setState(s){ G.state = s; Snd.play(s); updateHud(); }
 function showBanner(text, color){ const b = $('banner'); b.textContent = text; b.style.color = color || '#ffd94d'; b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop'); }
+// 한 게임에서 같은 재해가 중복으로 발생하지 않는다: 이미 나온 재해(G.usedTraps)는 후보에서 뺀다.
+// 구간 후보가 모두 소진되면 아직 안 나온 전체 재해에서 고르고(가중치 없이 균등),
+// 그마저도 없으면(라운드 수 > 재해 종류) 기록을 비워 한 바퀴 더 돈다. 선택은 계속 시드 RNG(G.rng) 만 쓴다.
+function weightedPick(w){
+  const tot = Object.values(w).reduce((a, b) => a + b, 0); if (tot <= 0) return null;
+  let r = G.rng() * tot; for (const k in w){ r -= w[k]; if (r <= 0) return k; }
+  const ks = Object.keys(w); return ks[ks.length - 1];
+}
 function pickTrap(zoneKey){
-  const w = ZONE_TRAPS[zoneKey] || ZONE_TRAPS.road; const tot = Object.values(w).reduce((a, b) => a + b, 0);
-  let r = G.rng() * tot; for (const k in w){ r -= w[k]; if (r <= 0) return k; } return 'bus';
+  const POOL = TRAP_KEYS.filter(k => k !== 'fire');                       // 화염 심판은 마지막 라운드 전용 — 랜덤 풀에서 제외
+  if (POOL.every(k => G.usedTraps.includes(k))) G.usedTraps = [];         // 모두 소진 → 한 바퀴 리셋
+  const base = ZONE_TRAPS[zoneKey] || ZONE_TRAPS.road;
+  const w = {}; for (const k in base) if (!G.usedTraps.includes(k)) w[k] = base[k];
+  let pick = weightedPick(w);
+  if (!pick){                                                            // 이 구간 후보가 다 소진됨 → 미사용 재해 중에서
+    const rest = {}; for (const k of POOL) if (!G.usedTraps.includes(k)) rest[k] = 1;
+    pick = weightedPick(rest);
+  }
+  return pick || 'bus';
 }
 // 관문(체크포인트) 배치: 마지막 라운드를 뺀 라운드들을 코스 구간(한컴타워 제외)에 균등 배분하고
 // 남는 라운드는 뒤쪽 구간(대왕판교로)에 몰아 준다. 구간 안에서는 (i+1)/(k+1) 위치.
@@ -6480,6 +6494,7 @@ function startTrapRound(){
   // 마지막 라운드는 언제나 거인석상의 화염 심판(랜덤 풀에 없음). ?trap= 강제는 디버그용으로 우선.
   const isFinale = G.round >= G.rounds;
   const type = TRAP_KEYS.includes(forced) ? forced : (isFinale ? 'fire' : pickTrap(zoneKey));
+  if (!G.usedTraps.includes(type)) G.usedTraps.push(type);               // 이번 재해는 이후 라운드 후보에서 제외
   if (type === 'fire'){ G.state = 'TRAP_EXEC'; updateHud(); }   // 음악은 PLAYING 유지 — 긴장 음악이 매복을 스포일하지 않게. 에픽 테마는 석상이 눈뜰 때(spawnActors)
   else setState('TRAP_EXEC');
   G.trap = { type, victims, t: 0, phase: 'alert', endT: -1, cz: 0 };
@@ -6641,7 +6656,7 @@ function finishGame(){
   setTimeout(waitFeed, 7000);
   function showResults(){
     const box = $('winnerCards'); box.innerHTML = '';
-    const many = winners.length > 14;                                  // 넓은 패널(900px): 14명까지 큰 카드 6열, 넘으면 작은 카드 8열
+    const many = winners.length > 14;                                  // 항상 6열 그리드 — 14명 넘으면 카드만 한 단계 작게
     const groups = groupByPrize(winners);
     const heads = G.prizes.length > 0;                                 // 상품을 안 넣었으면 묶을 게 없으니 머리글도 없다
     for (const g of groups){
@@ -6796,7 +6811,7 @@ function startGame(){
     G.players.push(new Player(i, nm, -HALF_W + 1.5 + gapX * (c + 0.5) + rnd(-0.25, 0.25), 3 - r * 1.15 + rnd(-0.3, 0.3))); });
   // ★ 시작 순간 탈락 순서 전체 확정 (시드 RNG 셔플) — 게임 화면은 이 결과의 연출
   G.order = G.players.slice(); for (let i = G.order.length - 1; i > 0; i--){ const j = Math.floor(G.rng() * (i + 1)); [G.order[i], G.order[j]] = [G.order[j], G.order[i]]; }
-  G.deathPtr = 0; G.packZ = 0;
+  G.deathPtr = 0; G.packZ = 0; G.usedTraps = [];
   // 구간 길이(ZONE_BASE) → 관문을 구간 안에 배치 → 결승선. 마지막 관문 뒤에는 한컴타워까지 스프린트. 인원과 무관하게 같은 맵 길이.
   G.killPlan = planKills(names.length - G.winnersN, REF_ROUNDS); G.rounds = G.killPlan.length;
   ZONE_LEN = Math.max(15, Math.round(ZONE_BASE / TILE) * TILE);
